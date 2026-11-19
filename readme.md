@@ -10,8 +10,8 @@
 - **Ziel:** Aufbau einer automatisierten, idempotenten Datenstrecke von der JSON-Schnittstelle bis in ein DuckDB-Sternschema inklusive automatisierter Qualitätsprüfungen, SQL-Auswertungen und Matplotlib-Visualisierungen.
 - **Leitfrage:** *Wie verteilen sich Produktanzahl und Preisniveau im aktuellen dm-„Neu“-Sortiment über die wichtigsten Marken und Hauptkategorien, und wie unterscheiden sich dm-Eigenmarken preislich von Herstellermarken?*
 
--Welche Kategorien (dim_category) haben die meisten Neuheiten?
--Welche Marken (dim_brand) sind im Schnitt teurer oder günstiger – und wie verhalten sich dm-Eigenmarken im Vergleich zu Herstellermarken?
+- Welche Kategorien (dim_category) haben die meisten Neuheiten?
+- Welche Marken (dim_brand) sind im Schnitt teurer oder günstiger – und wie verhalten sich dm-Eigenmarken im Vergleich zu Herstellermarken?
 
 ## Sternschema & SCD-Entscheidungen (A3)
 
