@@ -1,0 +1,1 @@
+python -c "import duckdb; con = duckdb.connect('data/dm_warehouse.duckdb', read_only=True); print(con.execute('SELECT snapshot_date, COUNT(*) FROM fact_product_listings GROUP BY snapshot_date').fetchall())"
