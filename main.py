@@ -1,177 +1,157 @@
 #!/usr/bin/env python3
-# Shebang: Ermöglicht direktes Ausführen als Skript unter Linux/WSL2 (./main.py) mit dem System-/venv-Python.
 
+# Python Typ-Annotationen beim Laden einer Datei intern als einfache Strings speichert
 from __future__ import annotations
-# Sorgt dafür, dass Python Typ-Annotationen beim Laden einer Datei nicht sofort auswertet, sondern intern als einfache Strings speichert.
+# CLI-Argumente wie --input-file und --snapshot-date für Tests und Wiederanläufe.
 import argparse
-# Standardbibliothek: Ermöglicht CLI-Argumente wie --input-file und --snapshot-date für Tests und Wiederanläufe.
+# reproduzierbare Hashes lib (z. B. run_id aus Dateiname + Stichtag für Idempotenz).
 import hashlib
-# Standardbibliothek: Erzeugt reproduzierbare Hashes (z. B. run_id aus Dateiname + Stichtag für Idempotenz).
+# lib fuer json da JSON-Antwort der dm-API 
 import json
-# Standardbibliothek: Parst die JSON-Antwort der dm-API bzw. gespeicherte Rohdaten-Snapshots.
+# Reguläre Ausdrücke für Formatprüfungen (GTIN-Ziffern) und Preis-Strings.
 import re
-# Standardbibliothek: Reguläre Ausdrücke für Formatprüfungen (GTIN-Ziffern) und Preis-Strings.
+# sys lib Programmabbruch mit Exit-Code über sys.exit(...)
 import sys
-# Standardbibliothek: Für sauberen Programmabbruch mit Exit-Code über sys.exit(...) (wichtig für geplante Läufe).
+# Zeitstempel in UTC für konsistente Datums-/Laufprotokolle ohne Zeitzonen-Chaos.
 from datetime import datetime, timezone
-# Standardbibliothek: Zeitstempel in UTC für konsistente Datums-/Laufprotokolle ohne Zeitzonen-Chaos.
+# Betriebssystemunabhängige Pfadverarbeitung (Windows/WSL2/Linux).
 from pathlib import Path
-# Standardbibliothek: Betriebssystemunabhängige Pfadverarbeitung (Windows/WSL2/Linux).
+# Typisierung für verschachtelte JSON-Dictionaries und Listen.
 from typing import Any
-# Standardbibliothek: Typisierung für verschachtelte JSON-Dictionaries und Listen.
+# Fängt Netzwerk-/HTTP-Fehler beim API-Abruf gezielt ab.
 from urllib.error import URLError
-# Standardbibliothek: Fängt Netzwerk-/HTTP-Fehler beim API-Abruf gezielt ab.
+# HTTP-Client ohne Zusatzpakete (spart Abhängigkeiten auf der VM).
 from urllib.request import Request, urlopen
-# Standardbibliothek: HTTP-Client ohne Zusatzpakete (spart Abhängigkeiten auf der VM).
+# SQL-Datenbank: Ideal für Sternschema.
 import duckdb
-# Eingebettete analytische SQL-Datenbank: Ideal für Sternschema, Joins, Fensterfunktionen und schnelle lokale Läufe.
+# Visualisierung: Erzeugt die geforderten PNG-Diagramme (>= 3 Charts) für A5/A6.
 import matplotlib.pyplot as plt
-# Standardbibliothek/Visualisierung: Erzeugt die geforderten PNG-Diagramme (>= 3 Charts) für A5/A6.
 
 DEFAULT_URL = (
     # Basis-Endpunkt der dm-Produktsuche im Crawl-Modus:
     "https://product-search.services.dmtech.com/de/search/crawl"
-    # Filtert auf Neuheiten (isNew=true), Facette "Neu", bis zu 1000 Einträge, Seite 0, inkl. Apotheke:
+    # Filtert auf Neuheiten (isNew=true), 
     "?isNew=true&popularFacet=Neu&pageSize=1000&searchType=editorial-search&sort=new&type=search-static&currentPage=0&enablePharmacy=true"
 )
 
+# Basisverzeichnis des Projekts
 BASE_DIR = Path(__file__).resolve().parent
-# Basisverzeichnis des Projekts, unabhängig davon, aus welchem Arbeitsordner python main.py gestartet wird.
-
+# Ordner für unveränderte JSON-Rohsnapshots 
 RAW_DIR = BASE_DIR / "data" / "raw"
-# Ordner für unveränderte JSON-Rohsnapshots (Nachvollziehbarkeit, Offline-Fallback und Reproduzierbarkeit).
-
+# Pfad zur DuckDB-Datei
 DB_PATH = BASE_DIR / "data" / "dm_warehouse.duckdb"
-# Pfad zur DuckDB-Datei, in der Dimensionen, Fakten und Protokolltabellen persistiert werden.
-
-SQL_PATH = BASE_DIR / "sql" / "analytics.sql"
 # Pfad zur externen SQL-Datei mit den Auswertungsabfragen aus Anforderung A4.
-
-OUT_DIR = BASE_DIR / "outputs"
+SQL_PATH = BASE_DIR / "sql" / "analytics.sql"
 # Zielordner für die generierten Matplotlib-Diagramme.
+OUT_DIR = BASE_DIR / "outputs"
 
 
 def ensure_dirs() -> None:
-    # Legt benötigte Verzeichnisse beim Start an, falls sie noch nicht existieren (verhindert FileNotFoundError).
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    # parents=True erstellt auch Zwischenebenen (z. B. data), exist_ok=True macht den Aufruf idempotent.
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Stellt sicher, dass outputs/ für die PNG-Exporte bereitsteht.
 
 
 # 1. EXTRACT
 def fetch_or_load_raw(input_file: Path | None, url: str) -> tuple[list[dict[str, Any]], Path]:
-    # Entweder lokale Datei laden (für Tests/neue Batches) oder live von der URL ziehen.
+    # lokale Datei laden | live von der URL ziehen.
     if input_file is not None:
-        # Prüft explizit, ob eine übergebene Datei existiert, bevor json.loads() fehlschlägt.
         if not input_file.exists():
             raise FileNotFoundError(f"Eingabedatei nicht gefunden: {input_file}")
         raw_path = input_file
-        # Merkt sich den genutzten Quellpfad für das Protokoll.
     else:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # Tagesstempel im ISO-Format, damit pro Tag ein sauber benannter Snapshot entsteht.
         raw_path = RAW_DIR / f"dm_neu_{today_str}.json"
-        # Zielpfad für den heutigen Rohdaten-Snapshot.
-        req = Request(
-            url,
-            headers={
-                # Setzt einen klaren User-Agent und JSON-Accept-Header, damit der Endpunkt sauber antwortet.
+        req = Request( url, headers={
                 "User-Agent": "Mozilla/5.0 (DataEngineering-Kursprojekt)",
                 "Accept": "application/json",
             },
         )
         try:
-            # Timeout von 30s verhindert, dass ein hängender Netzwerkaufruf den ganzen Job blockiert.
+            # Timeout von 30s 
             with urlopen(req, timeout=30) as resp:
                 payload = resp.read().decode("utf-8")
-                # Dekodiert die Rohbytes explizit als UTF-8 (wichtig für Umlaute und das €-Zeichen).
+                # wichtig für Umlaute und das €-Zeichen
             raw_path.write_text(payload, encoding="utf-8")
-            # Speichert die Rohdaten unverändert ab (ELT/Reproduzierbarkeit/Auditierbarkeit).
+            # Speichert die Rohdaten unverändert ab 
         except URLError as exc:
-            # Fallback bei Netzwerk-/API-Ausfall: Suche nach bereits vorhandenen Snapshots.
+            # Fallback bei Netzwerk-/API-Ausfall: 
+            # Suche nach bereits vorhandenen Snapshots.
             existing = sorted(RAW_DIR.glob("dm_neu_*.json"))
             if existing:
-                # Nimmt den neuesten vorhandenen Snapshot, damit der Lauf lokal trotzdem testbar bleibt.
+                # Nimmt den neuesten vorhandenen Snapshot
                 raw_path = existing[-1]
                 print(f"[WARNUNG] API nicht erreichbar ({exc}). Nutze letzten Snapshot: {raw_path.name}")
             else:
-                # Kein Fallback vorhanden -> geordneter Abbruch mit aussagekräftiger Fehlermeldung.
                 raise RuntimeError(
                     f"API nicht erreichbar ({exc}) und kein lokaler Snapshot unter {RAW_DIR} vorhanden."
                 ) from exc
 
-    data = json.loads(raw_path.read_text(encoding="utf-8"))
     # Parst die JSON-Datei in Python-Strukturen.
+    data = json.loads(raw_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("products"), list):
-        # Frühzeitige Strukturprüfung (Schema-Guard), falls sich das API-Format unerwartet ändert.
         raise ValueError("Unerwartete JSON-Struktur: Top-Level-Key 'products' (Liste) fehlt.")
-    return data["products"], raw_path
     # Gibt die Liste der Produkt-Dictionaries und den genutzten Dateipfad zurück.
+    return data["products"], raw_path
 
 
 # 2. DATA QUALITY & RULE-BASED CLEANSING (A2)
 def parse_euro_string(val: Any) -> float | None:
-    # Vereinheitlicht Preise, die mal als float (12.95) und mal als String ("10,88 €") vorliegen.
+    # Preise, mal als float (12.95) und mal als String ("10,88 €") fixen.
     if val is None:
         return None
-        # Fehlende Werte bleiben None und werden in der DQ-Prüfung gezielt erkannt.
     if isinstance(val, (int, float)):
         return float(val)
-        # Wandelt int/float direkt in float um.
     if isinstance(val, str):
-        # Entfernt Währungszeichen, Leerzeichen und geschützte Leerzeichen (\xa0), wandelt Komma in Punkt.
+        # Entfernt Währungszeichen, Leerzeichen und geschützte Leerzeichen (\xa0)
         cleaned = re.sub(r"[^\d,.\-]", "", val).replace(",", ".")
         try:
             return float(cleaned)
         except ValueError:
-            # Nicht parsebare Strings liefern None statt das gesamte Skript abstürzen zu lassen.
             return None
     return None
-    # Alle anderen Datentypen werden als ungültig/nicht parsebar behandelt.
 
 
+# Zugriff auf verschachtelte Felder des dm-JSONs an einer einzigen Stelle.
 def extract_fields(item: dict[str, Any]) -> dict[str, Any]:
-    # Kapselt den Zugriff auf verschachtelte Felder des dm-JSONs an einer einzigen Stelle.
+    # Zugriff auf tileData 
     tile = item.get("tileData") or {}
-    # Sicherer Zugriff auf tileData (falls null/fehlend, leeres Dict statt AttributeError).
+    # Sicherer Zugriff auf trackingData 
     tracking = tile.get("trackingData") or {}
-    # Sicherer Zugriff auf trackingData (enthält u. a. numerischen Preis, Kategorien und isPharmacy).
-    rating_obj = (item.get("context") or {}).get("rating") or {}
     # Sicherer Zugriff auf Bewertungsdaten (ratingValue, ratingCount).
-
-    gtin_raw = item.get("gtin") or tile.get("gtin")
+    rating_obj = (item.get("context") or {}).get("rating") or {}
+        
     # Nutzt primär top-level gtin, mit Fallback auf tileData.gtin.
+    gtin_raw = item.get("gtin") or tile.get("gtin")
+    # Wandelt GTIN in bereinigten String 
     gtin = str(gtin_raw).strip() if gtin_raw is not None else ""
-    # Wandelt GTIN in bereinigten String um (verhindert führende-/Nachlauf-Leerzeichen).
-
+     
     dan_raw = item.get("dan") or tile.get("dan")
     # Extrahiert die dm-Artikelnummer (DAN) als zusätzliches Identifikationsmerkmal.
     dan = str(dan_raw).strip() if dan_raw is not None else ""
 
-    title = str(item.get("title") or (tile.get("title") or {}).get("tileHeadline") or "").strip()
     # Holt den Produkttitel mit Fallback auf tileHeadline.
-    brand = str(item.get("brandName") or tracking.get("brand") or (tile.get("brand") or {}).get("name") or "").strip()
+    title = str(item.get("title") or (tile.get("title") or {}).get("tileHeadline") or "").strip()
     # Holt den Markennamen über mehrere Fallbacks, um Varianten im Payload abzufangen.
+    brand = str(item.get("brandName") or tracking.get("brand") or (tile.get("brand") or {}).get("name") or "").strip()
 
-    price_eur = parse_euro_string(tracking.get("price"))
     # Bevorzugt den bereits numerischen Preis aus trackingData.price.
+    price_eur = parse_euro_string(tracking.get("price"))
     if price_eur is None:
-        # Fallback auf den formatierten Preis-String unter tileData.price.price.current.value.
+        # Preis-String unter tileData.price.price.current.value.
         price_str = (((tile.get("price") or {}).get("price") or {}).get("current") or {}).get("value")
         price_eur = parse_euro_string(price_str)
 
-    net_str = (((tile.get("netPrice") or {}).get("price") or {}).get("current") or {}).get("value")
     # Liest den Nettopreis aus tileData.netPrice aus.
+    net_str = (((tile.get("netPrice") or {}).get("price") or {}).get("current") or {}).get("value")
     net_price_eur = parse_euro_string(net_str)
 
-    raw_cats = tracking.get("categories") or []
     # Liest die Kategorienliste aus trackingData.categories.
-    cats = [str(c).strip() for c in raw_cats if isinstance(c, str) and c.strip()]
+    raw_cats = tracking.get("categories") or []
     # Filtert leere oder nicht-string Einträge aus der Kategorienliste.
+    cats = [str(c).strip() for c in raw_cats if isinstance(c, str) and c.strip()]
 
-    is_pharmacy = bool(tracking.get("isPharmacy", tile.get("isPharmacy", False)))
     # Wandelt das Apotheken-Flag sauber in einen booleschen Wert um.
+    is_pharmacy = bool(tracking.get("isPharmacy", tile.get("isPharmacy", False)))
     is_limited = any(
         # Prüft Eyecatcher-Texte auf "limitiert", um limitierte Editionen als Merkmal zu erfassen.
         "limitiert" in str(ec.get("alt", "")).lower()
@@ -179,11 +159,11 @@ def extract_fields(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(ec, dict)
     )
 
-    rating_val = parse_euro_string(rating_obj.get("ratingValue"))
     # Extrahiert die Durchschnittsbewertung (falls vorhanden).
+    rating_val = parse_euro_string(rating_obj.get("ratingValue"))
     rating_cnt_raw = rating_obj.get("ratingCount")
+    # rating_count ist eine Ganzzahl (Standard 0).
     rating_count = int(rating_cnt_raw) if isinstance(rating_cnt_raw, (int, float)) else 0
-    # Stellt sicher, dass rating_count immer eine Ganzzahl (Standard 0) ist.
 
     return {
         "gtin": gtin,
@@ -201,7 +181,7 @@ def extract_fields(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def derive_price_tier(price_eur: float) -> str:
-    # Regelbasierte Klassifikation des Preises in drei verständliche Preissegmente für Auswertungen.
+    # Regelbasierte Klassifikation des Preises 
     if price_eur < 5.0:
         return "Günstig (< 5 €)"
     if price_eur <= 15.0:
@@ -209,9 +189,7 @@ def derive_price_tier(price_eur: float) -> str:
     return "Premium (> 15 €)"
 
 
-def run_data_quality(
-    raw_products: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+def run_data_quality( raw_products: list[dict[str, Any]],) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     # Zählt für jede Prüfung geprüft, bestanden und abgelehnt (Kontrollzahlen nach A2).
     checks = {
         "1_pflichtfelder": {"checked": 0, "passed": 0, "rejected": 0},
@@ -219,17 +197,17 @@ def run_data_quality(
         "3_wertebereich_preis": {"checked": 0, "passed": 0, "rejected": 0},
         "4_duplikat_gtin": {"checked": 0, "passed": 0, "rejected": 0},
     }
-    rejects: list[dict[str, str]] = []
     # Sammelt abgelehnte Zeilen inkl. Schlüssel und Grund für dq_reject_log.
-    valid_rows: list[dict[str, Any]] = []
+    rejects: list[dict[str, str]] = []
     # Sammelt bereinigte, valide Datensätze für das Sternschema.
-    seen_gtins: set[str] = set()
+    valid_rows: list[dict[str, Any]] = []
     # Set für O(1)-Duplikaterkennung innerhalb des aktuellen Batches.
+    seen_gtins: set[str] = set()
 
     for idx, raw_item in enumerate(raw_products):
         f = extract_fields(raw_item)
+        # GTIN als Schlüssel im Reject-Protokoll oder ROW_<idx>, falls GTIN fehlt.
         record_key = f["gtin"] if f["gtin"] else f"ROW_{idx}"
-        # Nutzt GTIN als Schlüssel im Reject-Protokoll oder ROW_<idx>, falls GTIN fehlt.
 
         # Prüfung 1: Pflichtfelder dürfen nicht fehlen/leer sein.
         checks["1_pflichtfelder"]["checked"] += 1
@@ -243,7 +221,7 @@ def run_data_quality(
                 }
             )
             continue
-            # Überspringt die Zeile, damit sie nicht in spätere Prüfungen oder Fakten gelangt.
+        # Überspringt die Zeile, damit sie nicht in spätere Prüfungen oder Fakten gelangt.
         checks["1_pflichtfelder"]["passed"] += 1
 
         # Prüfung 2: GTIN muss aus 8 bis 14 Ziffern bestehen.
@@ -287,6 +265,7 @@ def run_data_quality(
             )
             continue
         seen_gtins.add(f["gtin"])
+
         # Merkt die gültige GTIN für zukünftige Duplikatprüfungen im selben Lauf.
         checks["4_duplikat_gtin"]["passed"] += 1
 
@@ -336,9 +315,9 @@ def init_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
         CREATE SEQUENCE IF NOT EXISTS seq_brand_sk START 1;
-        -- Surrogate-Key-Sequenz für dim_brand (da bei SCD2 mehrere Versionen derselben Marke existieren können).
+        -- en : creates a database counter (sequence) in DuckDB that generates unique, auto-incrementing integers (1, 2, 3, ...) for dim_brand.brand_sk (the surrogate key).
         CREATE SEQUENCE IF NOT EXISTS seq_category_sk START 1;
-        -- Surrogate-Key-Sequenz für dim_category.
+        -- en : like above for seq_category_sk 
 
         CREATE TABLE IF NOT EXISTS dim_brand (
             brand_sk INTEGER PRIMARY KEY DEFAULT nextval('seq_brand_sk'),
@@ -412,26 +391,42 @@ def init_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def classify_brand_segment(brand_name: str) -> str:
-    # Fachliche Regel: Unterscheidet bekannte dm-Eigenmarken von externen Herstellermarken.
+    # https://www.dm.de/unternehmen/dm-marken
     dm_own_brands = {
-        "balea",
+        "alana",
         "alverde",
         "alverde naturkosmetik",
-        "denkmit",
         "babylove",
-        "mivolis",
+        "balea",
+        "balea men",
+        "dein bestes",
+        "denkmit",
+        "dmbio",
+        "dm home",
         "dontodent",
         "ebelin",
+        "fascino",
+        "hautsache",
+        "hallohebamme",
+        "ivorell",
+        "jessa",
+        "langhaarmädchen",
+        "mivolis",
+        "paradies",
         "profissimo",
+        "pusblu",
+        "réell'e",
+        "sanft & sicher",
+        "saubär",
+        "saugstark & sicher",
+        "seinz.",
+        "soft & sicher",
+        "sportness",
+        "s-quito free",
         "sundance",
         "trend !t up",
         "trend it up",
-        "dmbio",
-        "saubär",
-        "seinz.",
-        "langhaarmädchen",
-        "jessa",
-        "fashy",
+        "visiomax",
     }
     return "dm-Eigenmarke" if brand_name.lower() in dm_own_brands else "Herstellermarke"
 
@@ -443,16 +438,16 @@ def load_star_schema(
     source_file: Path,
     snapshot_date: str,
 ) -> dict[str, int]:
-    now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
     # Einheitlicher Laufzeitstempel für alle Tabellenänderungen dieses Runs.
-    run_id = hashlib.sha256(f"{source_file.name}:{snapshot_date}".encode()).hexdigest()[:12]
+    now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
     # Deterministische run_id: Bei erneutem Lauf derselben Datei am selben Stichtag wird dieselbe run_id erzeugt.
+    run_id = hashlib.sha256(f"{source_file.name}:{snapshot_date}".encode()).hexdigest()[:12]
 
     con.execute("BEGIN TRANSACTION;")
     # Startet eine atomare Transaktion: Entweder gelingt der gesamte Lade-Schritt oder nichts wird geändert.
     try:
-        con.execute("DELETE FROM dq_reject_log WHERE run_id = ?;", [run_id])
         # Löscht alte Reject-Einträge genau dieses run_id vor dem Neu-Einfügen (idempotent bei Wiederholung).
+        con.execute("DELETE FROM dq_reject_log WHERE run_id = ?;", [run_id])
         for rej in rejects:
             con.execute(
                 "INSERT INTO dq_reject_log VALUES (?, ?, ?, ?, ?);",
@@ -572,7 +567,8 @@ def load_star_schema(
                 ],
             )
 
-        fact_total = con.execute("SELECT COUNT(*) FROM fact_product_listings;").fetchone()[0]
+        row = con.execute("SELECT COUNT(*) FROM fact_product_listings;").fetchone()
+        fact_total = int(row[0]) if row and row[0] is not None else 0
         # Ermittelt die Gesamtzeilenzahl in der Faktentabelle nach dem Laden.
 
         con.execute("DELETE FROM etl_run_log WHERE run_id = ?;", [run_id])
@@ -601,10 +597,10 @@ def load_star_schema(
             "fact_rows_total": fact_total,
         }
     except Exception:
+        # Macht bei jedem Fehler alle Teiländerungen rückgängig 
         con.execute("ROLLBACK;")
-        # Macht bei jedem Fehler alle Teiländerungen rückgängig (sauberes Ende ohne inkonsistenten Zustand).
+        # Reicht die Exception nach oben weiter
         raise
-        # Reicht die Exception nach oben weiter, damit main() einen Fehler-Exit-Code zurückgibt.
 
 
 # 4. SQL ANALYTICS & 5. MATPLOTLIB CHARTS (A4, A5)
@@ -615,11 +611,11 @@ def run_sql_analytics(con: duckdb.DuckDBPyConnection, sql_path: Path) -> None:
     print("\n=== SQL-AUSWERTUNGEN (sql/analytics.sql) ===")
     for idx, stmt in enumerate(statements, start=1):
         lines = stmt.splitlines()
+        # Nur nicht-kommentierte SQL-Zeilen prüfen
         first_comment = next(
             (line.lstrip("- ").strip() for line in lines if line.strip().startswith("--")),
             f"Abfrage {idx}",
         )
-        # Nur nicht-kommentierte SQL-Zeilen prüfen, damit reine Kommentarblöcke übersprungen werden
         sql_only = "\n".join(
             line for line in lines if line.strip() and not line.strip().startswith("--")
         ).strip()
@@ -819,5 +815,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Führt main() nur aus, wenn main.py direkt gestartet wird (nicht bei einem Import).
     sys.exit(main())
